@@ -27,6 +27,8 @@ import time
 import subprocess
 import os
 import resource
+import signal
+import atexit
 from pathlib import Path
 from collections import defaultdict
 
@@ -377,6 +379,112 @@ queue
     return submit_file
 
 
+def build_worker_argv(integral, output_file,
+                      model_checkpoint, beam_width, max_steps, prime,
+                      topology_dir,
+                      paper_masters_only=True, cpus=1, beam_sort='mixed',
+                      checkpoint_path=None, checkpoint_interval=50,
+                      checkpoint_time_seconds=300, resume_from=None,
+                      dedup_beam_by_content=False,
+                      use_delta_worker=False,
+                      use_v6_worker=False, use_v7_worker=False, v7_cpus=1):
+    """Build (worker_script, argv_list, effective_cpus) for a direct (non-Condor)
+    subprocess launch of a single-integral one-step reduction.
+
+    This is the --backend local counterpart of create_condor_submit(): same
+    flag logic and branching (use_v7_worker / use_v6_worker / use_delta_worker /
+    else), but argv_list is a real list of strings suitable for subprocess.Popen
+    (no shell quoting), and effective_cpus mirrors create_condor_submit()'s
+    v7_cpus-derived cpu count (== request_cpus there) so local CPU-budget
+    accounting matches what Condor would have reserved for the same job.
+
+    Deliberately a separate implementation from create_condor_submit() (not a
+    shared refactor) so the existing Condor .sub-file generation is provably
+    unaffected by this addition.
+    """
+    integral_str = ','.join(str(x) for x in integral)
+    effective_cpus = cpus
+    if use_v7_worker:
+        effective_cpus = v7_cpus + (2 if v7_cpus > 1 else 0)
+
+    paper_masters_flag = [] if paper_masters_only else ['--no-paper-masters-only']
+    n_workers_flag = ['--n_workers', str(effective_cpus)] if effective_cpus > 1 else []
+    beam_sort_flag = ['--beam-sort', beam_sort] if beam_sort != 'mixed' else []
+    cp_flag = ([] if not checkpoint_path else
+              ['--checkpoint-path', str(checkpoint_path),
+               '--checkpoint-interval', str(checkpoint_interval),
+               '--checkpoint-time-seconds', str(checkpoint_time_seconds)])
+    resume_flag = ['--resume-from', str(resume_from)] if resume_from else []
+    dedup_flag = ['--dedup-beam-by-content'] if dedup_beam_by_content else []
+
+    # NOTE: --integral is passed as a single '--integral=value' token, not two
+    # separate argv elements. integral_str can start with '-' (a negative
+    # leading index, e.g. '-1,-1,1,...'); argparse's negative-number heuristic
+    # only recognizes plain integers/floats, so a bare '-1,...' token after a
+    # separate '--integral' token is misread as an unrecognized option and
+    # argparse aborts with "expected one argument". The Condor path sidesteps
+    # this the same way via --integral='...' in its shell-quoted arguments=
+    # string; here we do it directly since this is a real argv list.
+    common_head = ['--topology', str(topology_dir), f'--integral={integral_str}',
+                   '--output', str(output_file),
+                   '--model-checkpoint', str(model_checkpoint),
+                   '--beam_width', str(beam_width), '--max_steps', str(max_steps),
+                   '--prime', str(prime), '--device', 'cpu', '-v']
+
+    if use_v7_worker:
+        worker_script = 'onestep_worker_v7.py'
+        argv = (common_head + ['--v7-cpus', str(v7_cpus)]
+                + paper_masters_flag + resume_flag)
+    elif use_v6_worker:
+        worker_script = 'onestep_worker_v6.py'
+        argv = common_head + paper_masters_flag + cp_flag + resume_flag
+    elif use_delta_worker:
+        worker_script = 'delta_onestep_worker.py'
+        argv = common_head + paper_masters_flag
+    else:
+        worker_script = 'onestep_worker.py'
+        argv = (common_head + paper_masters_flag + n_workers_flag + beam_sort_flag
+                + cp_flag + resume_flag + dedup_flag)
+
+    return worker_script, argv, effective_cpus
+
+
+def launch_local_job(work_dir, job_name, worker_script, argv):
+    """Launch a worker as a direct subprocess (--backend local). No shell, no
+    Condor — stdout/stderr go to the same work_dir/logs/*.out/.err files the
+    Condor path would have used. Returns the Popen handle (kept as the opaque
+    job handle in `pending`, in place of a Condor cluster id).
+    """
+    cmd = [PYTHON_PATH, '-u', str(REPO_DIR / 'reduction' / worker_script)] + argv
+    out_path = work_dir / 'logs' / f'{job_name}.out'
+    err_path = work_dir / 'logs' / f'{job_name}.err'
+    out_fh = open(out_path, 'w')
+    err_fh = open(err_path, 'w')
+    try:
+        proc = subprocess.Popen(cmd, stdout=out_fh, stderr=err_fh, cwd=str(REPO_DIR))
+    finally:
+        # The child has its own dup'd fds; close our copies immediately so we
+        # don't leak file descriptors across thousands of jobs in a long run.
+        out_fh.close()
+        err_fh.close()
+    return proc
+
+
+def kill_local_proc(proc, term_timeout=5.0):
+    """Terminate a local worker subprocess, escalating to SIGKILL if it doesn't
+    exit promptly. Always reaps (no zombies)."""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=term_timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    except Exception:
+        pass
+
+
 def submit_condor_job(submit_file):
     """Submit ONE Condor job; return its 'cluster.proc' id ('C.0'). Used by the
     straggler-resubmit path (disabled in production)."""
@@ -494,6 +602,21 @@ def main():
                         help='Seconds between job status checks')
     parser.add_argument('--max-concurrent', type=int, default=10000,
                         help='Maximum concurrent Condor jobs')
+    parser.add_argument('--backend', type=str, default='condor',
+                        choices=['condor', 'local'],
+                        help="Execution backend for worker jobs. 'condor' "
+                             '(default): submit via condor_submit/condor_q/'
+                             "condor_rm, unchanged. 'local': launch workers "
+                             'directly via subprocess.Popen on this machine, '
+                             'with admission gated by --max-cpus instead of a '
+                             'Condor scheduler (for boxes with no scheduler).')
+    parser.add_argument('--max-cpus', type=int, default=120,
+                        help='Maximum total CPUs to use concurrently for '
+                             '--backend local worker jobs (sum of each '
+                             "pending job's cpu count). Ignored for "
+                             '--backend condor (Condor handles admission '
+                             'there). Set below the machine total core count '
+                             'on shared boxes.')
     # PAPER DEFAULT: ON (trianglebox-paper recipe).
     parser.add_argument('--paper-masters-only', action=argparse.BooleanOptionalAction,
                         default=True,
@@ -653,9 +776,31 @@ def main():
     # State
     expr = {starting_integral: 1}  # Current expression (linear combo of integrals)
     cache = {}  # integral -> reduced expression (memoization)
-    pending = {}  # integral -> (cluster_id, output_file, submit_time, cpus)
+    # integral -> (cluster_id, output_file, submit_time, cpus). For
+    # --backend local, `cluster_id` is an OPAQUE job handle: a Condor cluster-id
+    # string for --backend condor, a live subprocess.Popen object for local.
+    pending = {}
     straggler_integrals = set()  # integrals that have been resubmitted as stragglers
     straggler2_integrals = set()  # integrals that have hit the second-level escalation
+
+    # --backend local: clean up any still-running worker subprocesses if the
+    # orchestrator exits for ANY reason (normal return, exception, Ctrl-C,
+    # SIGTERM) — critical on a shared machine so a stopped orchestrator never
+    # leaves orphaned workers eating cores. Every live local Popen is already
+    # sitting in `pending`'s first slot, so no separate registry is needed.
+    # Known gap: this cannot catch SIGKILL or a segfault of the orchestrator
+    # itself (uncatchable/unreachable) — accepted limitation, not fixed here.
+    if args.backend == 'local':
+        def _cleanup_local_workers():
+            for cluster_id, _output_file, _submit_time, _cpus in pending.values():
+                kill_local_proc(cluster_id)
+        atexit.register(_cleanup_local_workers)
+
+        def _signal_handler(signum, frame):
+            _cleanup_local_workers()
+            sys.exit(1)
+        signal.signal(signal.SIGINT, _signal_handler)
+        signal.signal(signal.SIGTERM, _signal_handler)
 
     # --resume: scan work_dir/results/*.pkl, load each successful worker output
     # as a cache entry. Apply substitutions to start_expr to recover current expr.
@@ -822,8 +967,13 @@ def main():
                     continue  # result already on disk — let normal handling take it
                 if not cluster_id:
                     continue
-                obsolete_ids.append(str(cluster_id))
-                obsolete_integrals.append(integral)
+                if args.backend == 'local':
+                    kill_local_proc(cluster_id)
+                    del pending[integral]
+                    obsolete_integrals.append(integral)
+                else:
+                    obsolete_ids.append(str(cluster_id))
+                    obsolete_integrals.append(integral)
             if obsolete_ids:
                 try:
                     subprocess.run(['condor_rm'] + obsolete_ids,
@@ -831,7 +981,9 @@ def main():
                 except Exception:
                     pass
                 for integral in obsolete_integrals:
-                    del pending[integral]
+                    if integral in pending:
+                        del pending[integral]
+            if obsolete_integrals:
                 print(f"[Iter {iteration}] Cancelled {len(obsolete_integrals)} pending jobs "
                       f"(idle+running) whose integrals are no longer needed", flush=True)
 
@@ -854,8 +1006,17 @@ def main():
         # iteration into a single schedd round-trip instead of 75 -- the fix for
         # the schedd saturation that a big cache's spiky submit rate caused.
         newly_submitted = 0
-        batch = []
-        for integral in to_submit:
+        batch = []  # condor path: accumulated for one batch submit after loop
+        # --backend local CPU-budget admission gate: running tally of CPUs
+        # already committed to `pending` local jobs, incremented as we admit
+        # more this iteration. Composes with (doesn't replace) the job-count
+        # cap (--max-concurrent) already applied above via available_slots.
+        # Integrals skipped here stay in non_masters/cache-miss next
+        # iteration (they're simply not deleted from anything), so they're
+        # retried once a slot frees up.
+        cpus_in_use_local = (sum(c for (_, _, _, c) in pending.values())
+                             if args.backend == 'local' else 0)
+        for integral in sorted(to_submit, key=lambda i: tuple(-x for x in full_weight(i))):
             if integral not in depth:
                 depth[integral] = 0  # Top-level integral from initial expression
 
@@ -877,8 +1038,47 @@ def main():
                 job_name = f"async_{total_jobs}_{integral_to_str(integral)}"
                 resume_from = None
 
+            if (args.backend == 'local'
+                    and cpus_in_use_local + cpus > args.max_cpus):
+                continue  # over budget this iteration -- retry next loop
+
             output_file = work_dir / 'results' / f'{job_name}.pkl'
             last_checkpoint[integral] = str(output_file) + '.checkpoint'
+
+            if args.backend == 'local':
+                worker_script, argv, eff_cpus = build_worker_argv(
+                    integral, output_file,
+                    args.model_checkpoint, args.beam_width, args.max_steps, args.prime,
+                    topology_dir=args.topology,
+                    paper_masters_only=args.paper_masters_only, cpus=cpus,
+                    beam_sort=args.beam_sort,
+                    checkpoint_path=last_checkpoint[integral],
+                    checkpoint_interval=args.checkpoint_interval,
+                    checkpoint_time_seconds=args.checkpoint_time_seconds,
+                    resume_from=resume_from,
+                    dedup_beam_by_content=args.worker_dedup_beam_by_content,
+                    use_delta_worker=args.use_delta_worker,
+                    use_v6_worker=args.use_v6_worker,
+                    use_v7_worker=args.use_v7_worker, v7_cpus=args.v7_cpus,
+                )
+                if args.dry_run:
+                    print(f"  [DRY-RUN] would launch: {worker_script} {' '.join(argv)}")
+                    pending[integral] = (None, output_file, time.time(), eff_cpus)
+                    total_jobs += 1
+                    newly_submitted += 1
+                else:
+                    proc = launch_local_job(work_dir, job_name, worker_script, argv)
+                    pending[integral] = (proc, output_file, time.time(), eff_cpus)
+                    cpus_in_use_local += eff_cpus
+                    total_jobs += 1
+                    newly_submitted += 1
+                    if is_re_entry:
+                        print(f"  RE-ENTRY: Re-launched I{list(integral)} (pid={proc.pid}) "
+                              f"with {eff_cpus} CPUs "
+                              f"(resume={'yes' if resume_from else 'no'})", flush=True)
+                continue  # don't accumulate into condor batch
+
+            # Condor path: accumulate for one batch condor_submit after loop
             batch.append((integral, job_name, output_file, cpus, resume_from, is_re_entry))
             total_jobs += 1   # reserve the async id (job_name embeds it)
 
@@ -930,31 +1130,37 @@ def main():
         # Wait a bit
         time.sleep(args.check_interval)
 
-        # Check for stragglers (jobs that have been RUNNING on Condor too long
-        # — queue/idle wait time is excluded). Resubmit them with more CPUs.
+        # Check for stragglers (jobs that have been RUNNING too long — queue/
+        # idle wait time is excluded). Resubmit them with more CPUs.
         current_time = time.time()
-        # When stragglers are effectively disabled (huge timeouts, the production
-        # setting), skip the per-iteration JobStartDate condor_q entirely — it's
-        # one more schedd round-trip per iteration that buys nothing.
+        # Skip the per-iteration condor_q if: local backend (no queue to query)
+        # OR stragglers effectively disabled (huge timeouts, the production
+        # setting) — in both cases it's a schedd round-trip that buys nothing.
         stragglers_enabled = (args.straggler_timeout < 10**8
                               or args.straggler2_timeout < 10**8)
-        if stragglers_enabled:
+        if args.backend == 'local' or not stragglers_enabled:
+            start_times = {}
+        else:
             pending_cluster_ids = [cid for (cid, _, _, _) in pending.values() if cid]
             start_times = query_job_start_times(pending_cluster_ids)
-        else:
-            start_times = {}
         for integral, (cluster_id, output_file, submit_time, cpus) in list(pending.items()):
-            # Job runtime is wall time since Condor *started* executing the job.
-            # If the job is still queued (no JobStartDate yet) treat runtime as 0
-            # so the straggler logic only ever fires on jobs that actually ran.
-            start = start_times.get(str(cluster_id)) if cluster_id else None
-            job_runtime = (current_time - start) if start else 0
+            if args.backend == 'local':
+                job_runtime = current_time - submit_time
+            else:
+                # Job runtime is wall time since Condor *started* executing the
+                # job. If still queued (no JobStartDate yet) treat runtime as 0
+                # so the straggler logic only ever fires on jobs that actually ran.
+                start = start_times.get(str(cluster_id)) if cluster_id else None
+                job_runtime = (current_time - start) if start else 0
             # Only resubmit as straggler if: running too long, not already a straggler, and using single CPU
             if (job_runtime > args.straggler_timeout and
                 integral not in straggler_integrals and
                 cpus == 1):
                 # Kill the slow job
-                if cluster_id:
+                if args.backend == 'local':
+                    print(f"  Killed straggler job (pid={cluster_id.pid})", flush=True)
+                    kill_local_proc(cluster_id)
+                elif cluster_id:
                     try:
                         kill_result = subprocess.run(['condor_rm', str(cluster_id)], capture_output=True, text=True, timeout=10)
                         if kill_result.returncode == 0:
@@ -983,6 +1189,31 @@ def main():
                 resume_from = prev_cp if Path(prev_cp).exists() else None
                 new_checkpoint = str(new_output_file) + '.checkpoint'
                 last_checkpoint[integral] = new_checkpoint
+
+                if args.backend == 'local':
+                    worker_script, argv, eff_cpus = build_worker_argv(
+                        integral, new_output_file,
+                        args.model_checkpoint, args.beam_width, args.max_steps, args.prime,
+                        topology_dir=args.topology,
+                        paper_masters_only=args.paper_masters_only,
+                        cpus=args.straggler_cpus, beam_sort=args.beam_sort,
+                        checkpoint_path=new_checkpoint,
+                        checkpoint_interval=args.checkpoint_interval,
+                        checkpoint_time_seconds=args.checkpoint_time_seconds,
+                        resume_from=resume_from,
+                        dedup_beam_by_content=args.worker_dedup_beam_by_content,
+                        use_delta_worker=args.use_delta_worker,
+                        use_v6_worker=args.use_v6_worker,
+                        use_v7_worker=args.use_v7_worker, v7_cpus=args.v7_cpus,
+                    )
+                    new_proc = launch_local_job(work_dir, job_name, worker_script, argv)
+                    pending[integral] = (new_proc, new_output_file, time.time(), eff_cpus)
+                    straggler_integrals.add(integral)
+                    stragglers_resubmitted += 1
+                    total_jobs += 1
+                    print(f"  STRAGGLER: Re-launched I{list(integral)} (pid={new_proc.pid}) "
+                          f"with {eff_cpus} CPUs (was running {job_runtime/60:.1f} min)")
+                    continue
 
                 submit_file = create_condor_submit(
                     work_dir, integral, job_name, new_output_file,
@@ -1017,14 +1248,20 @@ def main():
         # promoted to --straggler2-cpus (16) + --straggler2-beam-width (40) +
         # dedup ON. Resumes from the latest checkpoint to preserve progress.
         for integral, (cluster_id, output_file, submit_time, cpus) in list(pending.items()):
-            start = start_times.get(str(cluster_id)) if cluster_id else None
-            job_runtime = (current_time - start) if start else 0
+            if args.backend == 'local':
+                job_runtime = current_time - submit_time
+            else:
+                start = start_times.get(str(cluster_id)) if cluster_id else None
+                job_runtime = (current_time - start) if start else 0
             if (job_runtime > args.straggler2_timeout
                 and integral in straggler_integrals
                 and integral not in straggler2_integrals
                 and cpus == args.straggler_cpus):
                 # Kill the 8-CPU job
-                if cluster_id:
+                if args.backend == 'local':
+                    print(f"  Killed straggler2 job (pid={cluster_id.pid})", flush=True)
+                    kill_local_proc(cluster_id)
+                elif cluster_id:
                     try:
                         kill_result = subprocess.run(['condor_rm', str(cluster_id)],
                                                      capture_output=True, text=True, timeout=10)
@@ -1046,6 +1283,34 @@ def main():
                 resume_from = prev_cp if Path(prev_cp).exists() else None
                 new_checkpoint = str(new_output_file) + '.checkpoint'
                 last_checkpoint[integral] = new_checkpoint
+
+                if args.backend == 'local':
+                    worker_script, argv, eff_cpus = build_worker_argv(
+                        integral, new_output_file,
+                        args.model_checkpoint,
+                        args.straggler2_beam_width,  # wider beam
+                        args.max_steps, args.prime,
+                        topology_dir=args.topology,
+                        paper_masters_only=args.paper_masters_only,
+                        cpus=args.straggler2_cpus,   # more CPUs
+                        beam_sort=args.beam_sort,
+                        checkpoint_path=new_checkpoint,
+                        checkpoint_interval=args.checkpoint_interval,
+                        checkpoint_time_seconds=args.checkpoint_time_seconds,
+                        resume_from=resume_from,
+                        dedup_beam_by_content=True,  # force dedup at this level
+                        use_delta_worker=args.use_delta_worker,
+                        use_v6_worker=args.use_v6_worker,
+                        use_v7_worker=args.use_v7_worker, v7_cpus=args.v7_cpus,
+                    )
+                    new_proc = launch_local_job(work_dir, job_name, worker_script, argv)
+                    pending[integral] = (new_proc, new_output_file, time.time(), eff_cpus)
+                    straggler2_integrals.add(integral)
+                    total_jobs += 1
+                    print(f"  STRAGGLER2: Re-launched I{list(integral)} (pid={new_proc.pid}) with "
+                          f"{eff_cpus} CPUs, beam={args.straggler2_beam_width}, "
+                          f"dedup ON (was running {job_runtime/3600:.1f}h)")
+                    continue
 
                 submit_file = create_condor_submit(
                     work_dir, integral, job_name, new_output_file,
@@ -1140,6 +1405,20 @@ def main():
                 except Exception as e:
                     print(f"  Error loading result for I{list(integral)}: {e}")
                     # Don't cache - will retry
+
+            elif (args.backend == 'local' and cluster_id is not None
+                  and cluster_id.poll() is not None):
+                # Local worker process exited but never wrote output_file (e.g.
+                # uncaught exception, OOM-killed) -- no Condor hold/escalation
+                # safety net exists for this locally, so detect it directly
+                # rather than leaving the integral pending forever and the
+                # CPU slot permanently stuck. Cache as identity, same as the
+                # explicit success=False branch above.
+                cache[integral] = {integral: 1}
+                print(f"  Failed I{list(integral)} - local worker exited "
+                      f"(code {cluster_id.returncode}) without producing "
+                      f"output - caching as identity")
+                completed_integrals.append(integral)
 
         # Remove completed from pending
         for integral in completed_integrals:

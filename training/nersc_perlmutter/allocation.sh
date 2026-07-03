@@ -1,7 +1,7 @@
 #!/bin/bash
-# Multi-node DDP training of pentagonbox_10x_packed on Perlmutter.
+# Multi-node DDP training on Perlmutter.
 #
-# Run inside an interactive salloc on 4 GPU nodes, wrapped in tmux so the
+# Run inside an interactive salloc on GPU nodes, wrapped in tmux so the
 # allocation survives SSH disconnect:
 #
 #   tmux new -s sailir
@@ -10,34 +10,32 @@
 #   # Ctrl-B D to detach; `tmux a -t sailir` to re-attach later.
 #
 # Env switches:
-#   SMOKE=1            — 5 epochs, 64 train shards, 16 val shards. All
-#                        other env switches below are ignored in this mode;
-#                        OUTPUT_DIR is forced to checkpoints/pentagonbox_10x_smoke.
-#                        Multiples of world_size=16; otherwise the dataset's
-#                        "drop remainder to evenly partition across ranks"
-#                        logic silently zeros out splits with fewer shards
-#                        than ranks. Exercises the train→val boundary and
-#                        post-epoch all-reduce.
+#   TOPOLOGY=path      — topology dir rel. to repo root (default topology_input/pentagonbox).
+#   SHARDS_DIR=path    — packed shards dir rel. to repo root (default data/pentagonbox_10x_packed).
+#   SMOKE=1            — 5 epochs, smoke-sized shards. OUTPUT_DIR forced to
+#                        checkpoints/<dataset>_smoke. Exercises rendezvous,
+#                        NCCL, sharded loader, val pass, checkpoint save.
+#                        Smoke shard counts must be multiples of world_size;
+#                        adjust MAX_SMOKE_TRAIN/MAX_SMOKE_VAL if using fewer GPUs.
 #   EPOCHS=N           — override epoch count (default 20).
 #   BATCH_SIZE=N       — per-rank batch size (default 128). Effective batch
-#                        is BATCH_SIZE × world_size. If you change this for
-#                        the full run, scale --lr accordingly (linear or
-#                        sqrt rule).
+#                        is BATCH_SIZE × world_size. If you change this,
+#                        scale --lr accordingly (linear or sqrt rule).
 #   MAX_TRAIN_SHARDS=N — cap train shards (default: all). Useful for small
 #                        end-to-end tests of the auto_resume + supervisor
 #                        path without a 4-hour allocation.
 #   N_VAL_SHARDS=N     — override val shard count (default 50).
-#   OUTPUT_DIR=path    — checkpoint output dir (default checkpoints/pentagonbox_10x).
+#   OUTPUT_DIR=path    — checkpoint output dir (default checkpoints/<dataset>).
 #                        Override to test against a non-default run dir.
 #                        Must agree with the supervisor's OUTPUT_DIR when
 #                        running under train_loop.sh.
 #                        Each split needs n_shards >= world_size.
-#   MODEL_VARIANT=name — which classifier class to train (default `full`,
-#                        i.e. IBPActionClassifier). `nosubs` selects
-#                        IBPActionClassifierNoSubs (subs encoder removed,
-#                        ~40% fewer params). Checkpoints from different
-#                        variants are NOT interchangeable; use a distinct
-#                        OUTPUT_DIR per variant.
+#   MODEL_VARIANT=name — which classifier class to train (default `nosubs`,
+#                        i.e. IBPActionClassifierNoSubs). `full` selects
+#                        IBPActionClassifier (subs encoder included, ~40%
+#                        more params, same accuracy). Checkpoints from
+#                        different variants are NOT interchangeable; use a
+#                        distinct OUTPUT_DIR per variant.
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -56,18 +54,27 @@ export NCCL_DEBUG=WARN
 export OMP_NUM_THREADS=16
 export PYTHONUNBUFFERED=1
 
+TOPOLOGY=${TOPOLOGY:-topology_input/pentagonbox}
+SHARDS_DIR=${SHARDS_DIR:-data/pentagonbox_10x_packed}
 SMOKE=${SMOKE:-0}
 EPOCHS=${EPOCHS:-20}
 BATCH_SIZE=${BATCH_SIZE:-128}
-MODEL_VARIANT=${MODEL_VARIANT:-full}
+MODEL_VARIANT=${MODEL_VARIANT:-nosubs}
 NUM_WORKERS=${NUM_WORKERS:-4}
 
+# Derive a short dataset name from SHARDS_DIR for log/checkpoint naming.
+DATASET=$(basename "$SHARDS_DIR" _packed)
+
 if [[ "$SMOKE" == "1" ]]; then
-    OUTPUT_DIR=checkpoints/pentagonbox_10x_smoke
+    OUTPUT_DIR=checkpoints/${DATASET}_smoke
     LOG_TAG=smoke
-    EXTRA_ARGS=( --max_train_shards 64 --n_val_shards 16 --epochs 5 )
+    # Smoke counts must be multiples of world_size (16 for 4-node × 4-GPU).
+    # If running on fewer GPUs (e.g. 1 node = 4 GPUs) lower these accordingly.
+    MAX_SMOKE_TRAIN=${MAX_SMOKE_TRAIN:-64}
+    MAX_SMOKE_VAL=${MAX_SMOKE_VAL:-16}
+    EXTRA_ARGS=( --max_train_shards "$MAX_SMOKE_TRAIN" --n_val_shards "$MAX_SMOKE_VAL" --epochs 5 )
 else
-    OUTPUT_DIR=${OUTPUT_DIR:-checkpoints/pentagonbox_10x}
+    OUTPUT_DIR=${OUTPUT_DIR:-checkpoints/${DATASET}}
     LOG_TAG=full
     N_VAL_SHARDS=${N_VAL_SHARDS:-50}
     EXTRA_ARGS=( --n_val_shards "$N_VAL_SHARDS" --epochs "$EPOCHS" --auto_resume )
@@ -76,7 +83,7 @@ fi
 EXTRA_ARGS+=( --model_variant "$MODEL_VARIANT" )
 
 mkdir -p "$OUTPUT_DIR" logs
-LOG=logs/pentagonbox_10x_${LOG_TAG}_$(date +%Y%m%d_%H%M%S).log
+LOG=logs/${DATASET}_${LOG_TAG}_$(date +%Y%m%d_%H%M%S).log
 
 {
   echo "[$(date -Iseconds)] launch SMOKE=$SMOKE EPOCHS=$EPOCHS"
@@ -91,8 +98,8 @@ srun -l -u \
     --cpus-per-task=32 \
     --gpu-bind=none \
     bash training/nersc_perlmutter/srun_task.sh \
-        --topology         topology_input/pentagonbox \
-        --shards_dir       data/pentagonbox_10x_packed \
+        --topology         "$TOPOLOGY" \
+        --shards_dir       "$SHARDS_DIR" \
         --buffer_shards    4 \
         --output_dir       "$OUTPUT_DIR" \
         --batch_size       "$BATCH_SIZE" \

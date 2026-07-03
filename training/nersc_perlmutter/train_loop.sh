@@ -43,6 +43,8 @@ WALLTIME=${WALLTIME:-04:00:00}
 NODES=${NODES:-4}
 GPUS=${GPUS:-16}
 OUTPUT_DIR=${OUTPUT_DIR:-checkpoints/pentagonbox_10x}
+# Pass TOPOLOGY/SHARDS_DIR through to allocation.sh if set.
+export TOPOLOGY SHARDS_DIR
 
 mkdir -p logs
 SUP_LOG=logs/supervisor_$(date +%Y%m%d_%H%M%S).log
