@@ -16,6 +16,6 @@ export WORLD_SIZE=${SLURM_NTASKS}
 # sailir/ package lives at repo root — add it to the path so train_classifier.py
 # can import classifier, topology, etc. directly.
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-export PYTHONPATH="${REPO_ROOT}/sailir:${PYTHONPATH:-}"
+export PYTHONPATH="${REPO_ROOT}/sailir:${REPO_ROOT}:${PYTHONPATH:-}"
 
 exec python -u training/train_classifier.py "$@"
