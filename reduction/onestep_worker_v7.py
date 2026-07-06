@@ -105,6 +105,7 @@ from sailir.topology import Topology
 from sailir.ibp_env import (set_prime, set_paper_masters_only, IBPEnvironment,
                             weight)
 from sailir.classifier import IBPActionClassifier
+from sailir.classifier_nosubs import IBPActionClassifierNoSubs
 from beam_search_utils import get_sector_mask
 
 
@@ -162,12 +163,14 @@ def main():
     bs7._V7_PACKED_RS_CACHE = {}
     bs7._PACKED_RS = (os.environ.get('SAILIR_PACKED_RS', '0') == '1')
 
-    model = IBPActionClassifier(
+    ck = torch.load(args.model_checkpoint, map_location='cpu', weights_only=False)
+    model_variant = (ck.get('args') or {}).get('model_variant', 'full')
+    ModelClass = IBPActionClassifierNoSubs if model_variant == 'nosubs' else IBPActionClassifier
+    model = ModelClass(
         n_indices=topology.n_indices,
         n_denominators=topology.n_denominators,
         n_ibp_ops=topology.n_actions,
     )
-    ck = torch.load(args.model_checkpoint, map_location='cpu', weights_only=False)
     model.load_state_dict(ck['model_state_dict'])
     model.eval()
 
