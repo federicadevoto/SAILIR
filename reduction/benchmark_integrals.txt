@@ -1,0 +1,8 @@
+# Benchmark integrals — one from each difficulty band (r+s = 6, 8, 9, 11, 13).
+# Run with: bash reduction/nersc_perlmutter/run_benchmark.sh
+# Each integral is timed independently; output goes to results/hexabox_bench/.
+1,1,0,0,1,1,1,1,0,0,0
+1,1,0,1,1,1,1,1,0,0,-1
+0,1,1,0,1,1,1,1,0,-3,0
+1,1,0,1,1,1,1,1,0,-3,-1
+1,1,1,1,1,1,1,1,-2,-1,-2
