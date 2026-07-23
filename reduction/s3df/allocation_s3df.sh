@@ -23,7 +23,7 @@
 #SBATCH --error=logs/reduce_%j.err
 
 set -uo pipefail
-cd "$(dirname "$0")/../.."
+cd "$SLURM_SUBMIT_DIR"
 
 if [[ -f venv/bin/activate ]]; then
     source venv/bin/activate
