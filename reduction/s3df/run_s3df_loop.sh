@@ -56,7 +56,10 @@ for i in $(seq 1 $MAX_SUBMISSIONS); do
     fi
 
     log "Submitting sbatch job..."
-    JOBID=$(sbatch --parsable reduction/s3df/allocation_s3df.sh)
+    JOBID=$(sbatch --parsable reduction/s3df/allocation_s3df.sh) || {
+        log "sbatch failed — check account/partition. Stopping."
+        exit 1
+    }
     log "Submitted job $JOBID"
 
     wait_for_job "$JOBID"
