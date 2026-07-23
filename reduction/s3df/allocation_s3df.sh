@@ -17,7 +17,8 @@
 #SBATCH --partition=milano
 #SBATCH --ntasks=32
 #SBATCH --cpus-per-task=8
-#SBATCH --time=24:00:00
+#SBATCH --mem-per-cpu=2G
+#SBATCH --time=8:00:00
 #SBATCH --output=logs/reduce_%j.out
 #SBATCH --error=logs/reduce_%j.err
 
