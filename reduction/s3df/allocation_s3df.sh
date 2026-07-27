@@ -13,7 +13,7 @@
 #   CPUS_PER_CHUNK   — CPU budget per chunk (default 8)
 #   N_CHUNKS         — parallel chunks (default 16)
 #SBATCH --job-name=hexabox_reduce
-#SBATCH --account=epptheory:qcd
+#SBATCH --account=epptheory:default
 #SBATCH --partition=milano
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=64
