@@ -30,7 +30,8 @@ SUP_LOG=logs/reduce_supervisor_$(date +%Y%m%d_%H%M%S).log
 log() { echo "[$(date -Iseconds)] $*" | tee -a "$SUP_LOG"; }
 
 count_done() {
-    find "$OUTBASE" -name "reduction.pkl" 2>/dev/null | wc -l | tr -d ' '
+    { find "$OUTBASE" -name "reduction.pkl" 2>/dev/null
+      find "$OUTBASE" -name "reduction.timeout" 2>/dev/null; } | wc -l | tr -d ' '
 }
 
 wait_for_job() {

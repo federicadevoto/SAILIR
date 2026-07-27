@@ -8,6 +8,8 @@
 #
 # Optional overrides (all default to paths relative to repo root):
 #   INTEGRAL_LIST, MODEL, TOPOLOGY, OUTBASE, PYTHON
+#   INTEGRAL_TIMEOUT   wall-clock seconds per integral (default 10800 = 3h)
+#                      on timeout, writes reduction.timeout and skips to next
 
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -19,6 +21,7 @@ PYTHON=${PYTHON:-python}
 MAX_CPUS=${MAX_CPUS:-8}
 CHUNK_ID=${CHUNK_ID:-0}
 N_CHUNKS=${N_CHUNKS:-1}
+INTEGRAL_TIMEOUT=${INTEGRAL_TIMEOUT:-10800}
 
 # Extract this chunk's integrals: line index (0-based) % N_CHUNKS == CHUNK_ID
 CHUNK_FILE=$(mktemp /tmp/sailir_chunk_${CHUNK_ID}_XXXXXX.txt)
@@ -40,11 +43,17 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     LABEL=$(echo "$INTEGRAL_STR" | tr ',' '_')
     OUTDIR=$OUTBASE/$LABEL
 
-    mkdir -p "$OUTDIR/logs" "$OUTDIR/work"
+    # skip if already done or previously timed out
+    if [[ -f "$OUTDIR/reduction.pkl" || -f "$OUTDIR/reduction.timeout" ]]; then
+        echo "[chunk $CHUNK_ID] skipping $((++n))/$N_INTEGRALS: TB[$INTEGRAL_STR] (already done/timed out)"
+        continue
+    fi
 
+    mkdir -p "$OUTDIR/logs" "$OUTDIR/work"
     echo "[chunk $CHUNK_ID] integral $((++n))/$N_INTEGRALS: TB[$INTEGRAL_STR]"
 
-    PYTHONUNBUFFERED=1 $PYTHON -u "$BASE/reduction/hierarchical_reduction.py" \
+    PYTHONUNBUFFERED=1 timeout "$INTEGRAL_TIMEOUT" \
+        $PYTHON -u "$BASE/reduction/hierarchical_reduction.py" \
         --topology         "$TOPOLOGY" \
         --integral         "$INTEGRAL_STR" \
         --output           "$OUTDIR/reduction.pkl" \
@@ -62,6 +71,14 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         --max-concurrent 1000 \
         --resume \
         2>&1 | tee "$OUTDIR/logs/hierarchical.log"
+    PIPE_RC=${PIPESTATUS[0]}
+
+    if [[ $PIPE_RC -eq 124 ]]; then
+        echo "[chunk $CHUNK_ID] TIMEOUT (${INTEGRAL_TIMEOUT}s) on integral $n: TB[$INTEGRAL_STR]"
+        touch "$OUTDIR/reduction.timeout"
+    elif [[ $PIPE_RC -ne 0 && ! -f "$OUTDIR/reduction.pkl" ]]; then
+        echo "[chunk $CHUNK_ID] FAILED (rc=$PIPE_RC) integral $n: TB[$INTEGRAL_STR]"
+    fi
 
     echo "[chunk $CHUNK_ID] done integral $n at $(date)"
 done < "$CHUNK_FILE"
