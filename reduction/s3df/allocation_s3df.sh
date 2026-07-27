@@ -4,8 +4,8 @@
 # Submit with: sbatch reduction/s3df/allocation_s3df.sh
 # (from repo root, on an sdfiana node)
 #
-# 16 chunks × 8 CPUs = 128 cores running as background processes on one node.
-# 700 integrals / 16 chunks ≈ 44 per chunk.
+# 8 chunks × 8 CPUs = 64 cores running as background processes on one node.
+# 700 integrals / 8 chunks ≈ 87 per chunk.
 # --resume skips already-finished integrals on resubmission.
 #
 # Env switches (all optional):
@@ -16,8 +16,8 @@
 #SBATCH --account=epptheory:qcd
 #SBATCH --partition=milano
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=128
-#SBATCH --mem=256G
+#SBATCH --cpus-per-task=64
+#SBATCH --mem=128G
 #SBATCH --time=8:00:00
 #SBATCH --output=logs/reduce_%j.out
 #SBATCH --error=logs/reduce_%j.err
@@ -39,7 +39,7 @@ export INTEGRAL_LIST=${INTEGRAL_LIST:-reduction/integrals_to_reduce.txt}
 export MODEL=${MODEL:-checkpoints/hexabox_100k/best_model.pt}
 export OUTBASE=${OUTBASE:-results/hexabox}
 export CPUS_PER_CHUNK=${CPUS_PER_CHUNK:-8}
-export N_CHUNKS=${N_CHUNKS:-16}
+export N_CHUNKS=${N_CHUNKS:-8}
 
 export PYTHONPATH="$(pwd)/sailir:$(pwd):${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
