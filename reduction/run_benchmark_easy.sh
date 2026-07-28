@@ -47,7 +47,7 @@ print(sum(x for x in idx if x>0)+sum(-x for x in idx if x<0))
 
     PYTHONUNBUFFERED=1 $PYTHON -u "$BASE/reduction/hierarchical_reduction.py" \
         --topology         "$TOPOLOGY" \
-        --integral         "$line" \
+        --integral="$line" \
         --output           "$OUTDIR/reduction.pkl" \
         --work-dir         "$OUTDIR/work" \
         --model-checkpoint "$MODEL" \

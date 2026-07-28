@@ -55,7 +55,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     PYTHONUNBUFFERED=1 timeout "$INTEGRAL_TIMEOUT" \
         $PYTHON -u "$BASE/reduction/hierarchical_reduction.py" \
         --topology         "$TOPOLOGY" \
-        --integral         "$INTEGRAL_STR" \
+        --integral="$INTEGRAL_STR" \
         --output           "$OUTDIR/reduction.pkl" \
         --work-dir         "$OUTDIR/work" \
         --model-checkpoint "$MODEL" \
