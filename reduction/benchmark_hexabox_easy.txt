@@ -1,8 +1,6 @@
-# 10 easiest hexabox integrals by r+s (4 at r+s=6, 6 at r+s=7)
+# 10 easiest non-master hexabox integrals by r+s (r+s=6–7)
 # Use for timing benchmarks before committing to full 700-integral run.
-0,1,1,0,1,1,1,1,0,0,0
-1,0,0,1,1,1,1,1,0,0,0
-1,0,1,0,1,1,1,1,0,0,0
+# All confirmed non-masters (masters complete trivially and don't test the model).
 1,1,0,0,1,1,1,1,0,0,0
 -1,1,1,0,1,1,1,1,0,0,0
 0,1,1,-1,1,1,1,1,0,0,0
@@ -10,3 +8,6 @@
 0,1,1,0,1,1,1,1,0,-1,0
 0,1,1,0,1,1,1,1,0,0,-1
 1,-1,0,1,1,1,1,1,0,0,0
+1,0,-1,1,1,1,1,1,0,0,0
+1,0,0,1,1,1,1,1,-1,0,0
+1,0,0,1,1,1,1,1,0,-1,0
