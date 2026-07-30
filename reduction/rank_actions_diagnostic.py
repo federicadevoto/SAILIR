@@ -134,9 +134,7 @@ def main():
             continue
         new_expr = apply_substitution(expr, integral, sol)
         non_masters = {k: v for k, v in new_expr.items() if v != 0 and not is_master(k)}
-        masters_in_result = {k for k in new_expr if v != 0 and is_master(k)
-                             for v in [new_expr[k]]}
-        has_paper_master = bool(new_expr.keys() & paper_masters)
+        has_paper_master = bool(k for k in new_expr if new_expr[k] != 0 and k in paper_masters)
         orig_w = weight(integral)
 
         if not non_masters:
