@@ -115,36 +115,46 @@ def main():
     # --- for each valid action, evaluate the result ---
     # "correct" = applying the action and the result has lower max weight
     # i.e. all non-masters in the result have weight < (r, s) of the original
-    correct_indices = []
+    # Identify the paper masters for this sector
+    from generate_multisector_data import get_masters_for_sector, PRIME as _P
+    paper_masters = set(get_masters_for_sector(sector_id))
+    print(f"Masters for sector {sector_id}: {[list(m) for m in paper_masters]}")
+
+    perfect_indices   = []  # all non-masters gone in one step
+    reduces_indices   = []  # strictly lower max weight after step
+    hits_master_indices = []  # master appears in result (multi-step)
     action_results = []
+
     for idx, (ibp_op, delta) in enumerate(valid_actions):
         seed = tuple(integral[i] + delta[i] for i in range(topology.n_indices))
         raw = get_raw_equation(ibp_t, li_t, ibp_op, seed)
-        cached = raw  # no subs yet
-        sol = solve_ibp_for(cached, integral)
+        sol = solve_ibp_for(raw, integral)
         if sol is None:
             action_results.append(None)
             continue
-        # Apply substitution to expr
         new_expr = apply_substitution(expr, integral, sol)
-        # Find all non-masters in the result
         non_masters = {k: v for k, v in new_expr.items() if v != 0 and not is_master(k)}
-        if not non_masters:
-            # All terms are masters — perfect one-step reduction!
-            correct_indices.append(idx)
-            action_results.append(('PERFECT', new_expr))
-        else:
-            max_w = max(weight(k) for k in non_masters)
-            orig_w = weight(integral)
-            if max_w < orig_w:
-                correct_indices.append(idx)
-                action_results.append(('REDUCES', new_expr, max_w))
-            else:
-                action_results.append(('NO_PROGRESS', new_expr, max_w))
+        masters_in_result = {k for k in new_expr if v != 0 and is_master(k)
+                             for v in [new_expr[k]]}
+        has_paper_master = bool(new_expr.keys() & paper_masters)
+        orig_w = weight(integral)
 
-    print(f"Actions that reduce weight: {len(correct_indices)}")
-    if correct_indices:
-        for ci in correct_indices:
+        if not non_masters:
+            perfect_indices.append(idx)
+            action_results.append(('PERFECT', new_expr))
+        elif non_masters and max(weight(k) for k in non_masters) < orig_w:
+            reduces_indices.append(idx)
+            action_results.append(('REDUCES', new_expr, max(weight(k) for k in non_masters)))
+        elif has_paper_master:
+            hits_master_indices.append(idx)
+            action_results.append(('HITS_MASTER', new_expr))
+        else:
+            action_results.append(('NO_PROGRESS', new_expr))
+
+    all_useful = perfect_indices + reduces_indices + hits_master_indices
+    print(f"Actions: perfect={len(perfect_indices)}  reduces_weight={len(reduces_indices)}  hits_master={len(hits_master_indices)}")
+    if all_useful:
+        for ci in all_useful[:10]:
             print(f"  action[{ci}] = (op={valid_actions[ci][0]}, delta={list(valid_actions[ci][1])})  -> {action_results[ci][0]}")
 
     # --- model scoring ---
@@ -170,14 +180,17 @@ def main():
         op, delta = valid_actions[idx]
         print(f"{rank+1:>5}  {probs[idx]:>8.4f}  {correct:>10}  {op}  {list(delta[:5])}")
 
-    # Show rank of correct actions
-    print(f"\nRank of correct actions:")
-    for ci in correct_indices:
-        rank = int(np.where(ranked == ci)[0][0]) + 1
-        print(f"  action[{ci}]: rank {rank}/{len(valid_actions)}  prob={probs[ci]:.4f}  ({action_results[ci][0]})")
-
-    if not correct_indices:
-        print("  (no action found that reduces weight — unexpected!)")
+    # Show rank of useful actions
+    print(f"\nRank of useful actions (perfect / reduces / hits_master):")
+    if all_useful:
+        for ci in all_useful:
+            rank = int(np.where(ranked == ci)[0][0]) + 1
+            print(f"  action[{ci}]: rank {rank}/{len(valid_actions)}  prob={probs[ci]:.4f}  ({action_results[ci][0]})")
+    else:
+        print("  No single-step useful actions found.")
+        print("  (This integral likely requires multi-step reduction via Kira.)")
+        print("  To identify the correct action sequence, run Kira on this integral")
+        print("  and provide the reduction here.")
 
 
 if __name__ == '__main__':
