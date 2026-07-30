@@ -174,7 +174,7 @@ def main():
     print(f"{'Rank':>5}  {'Prob':>8}  {'Correct?':>10}  op  delta[:5]")
     print("-" * 60)
     for rank, idx in enumerate(ranked[:10]):
-        correct = "*** YES ***" if idx in correct_indices else ""
+        correct = "*** YES ***" if idx in all_useful else ""
         op, delta = valid_actions[idx]
         print(f"{rank+1:>5}  {probs[idx]:>8.4f}  {correct:>10}  {op}  {list(delta[:5])}")
 
