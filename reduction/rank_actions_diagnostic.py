@@ -237,18 +237,17 @@ def _load_kira(kira_dir, integral, topology, valid_actions, ibp_t, li_t, prime):
     text = kira_result.read_text()
 
     # Identify our integral's Kira ID from the id2int file
+    # Format: - [id, i0, i1, ..., i10, sector, ...]
     integral_id = None
     id2int_path = kira_dir / 'results' / 'TB' / 'id2int'
     if id2int_path.exists():
-        try:
-            import yaml as _yaml
-            rows = _yaml.safe_load(id2int_path.read_text()) or []
-            for row in rows:
+        for line in id2int_path.read_text().splitlines():
+            nums = re.findall(r'-?\d+', line)
+            if len(nums) >= 12:
+                row = [int(x) for x in nums]
                 if tuple(row[1:12]) == integral:
                     integral_id = row[0]
                     break
-        except Exception:
-            pass
 
     from generate_multisector_data import get_masters_for_sector as _get_masters
     int_sector = get_sector_id(integral)
