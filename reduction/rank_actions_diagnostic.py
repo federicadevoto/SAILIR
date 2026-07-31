@@ -9,13 +9,16 @@ Usage (run from repo root):
         --topology topology_input/hexabox \
         --integral="1,0,0,1,0,2,1,0,0,0,0" \
         --model-checkpoint checkpoints/hexabox_100k/best_model.pt \
-        --prime 1009
+        --prime 1009 \
+        [--kira-result-dir ~/projects/IBPswithAI/kira_tb105]
 
-The script prints each valid action with its model probability rank,
-highlighting the ones that actually move toward the master.
+With --kira-result-dir, also parses Kira's truth reduction and reports
+which model actions are consistent with the Kira result.
 """
 
 import sys
+import re
+import gzip
 import argparse
 from pathlib import Path
 
@@ -52,6 +55,10 @@ def main():
     parser.add_argument('--model-checkpoint', required=True)
     parser.add_argument('--prime', type=int, default=1009)
     parser.add_argument('--no-paper-masters-only', action='store_true', default=True)
+    parser.add_argument('--kira-result-dir', default=None,
+                        help='Path to a completed kira_tb105 directory; '
+                             'parses results/TB/kira and tmp/TB/SYSTEM_TB_*.gz '
+                             'to show truth reduction and Kira-equation matching.')
     args = parser.parse_args()
 
     gmd.PRIME = args.prime
@@ -155,6 +162,14 @@ def main():
         for ci in all_useful[:10]:
             print(f"  action[{ci}] = (op={valid_actions[ci][0]}, delta={list(valid_actions[ci][1])})  -> {action_results[ci][0]}")
 
+    # --- Kira truth (optional) ---
+    kira_truth_str = None
+    kira_sailir_matches = {}  # action_idx -> kira eq fingerprint
+    if args.kira_result_dir:
+        kira_truth_str, kira_sailir_matches = _load_kira(
+            Path(args.kira_result_dir), integral, topology,
+            valid_actions, ibp_t, li_t, args.prime)
+
     # --- model scoring ---
     print("\nRunning model forward pass...")
     batch_data = [(expr, subs, valid_actions, sector_mask, integral)]
@@ -186,9 +201,110 @@ def main():
             print(f"  action[{ci}]: rank {rank}/{len(valid_actions)}  prob={probs[ci]:.4f}  ({action_results[ci][0]})")
     else:
         print("  No single-step useful actions found.")
-        print("  (This integral likely requires multi-step reduction via Kira.)")
-        print("  To identify the correct action sequence, run Kira on this integral")
-        print("  and provide the reduction here.")
+        print("  (This integral requires multi-step reduction.)")
+
+    if kira_truth_str:
+        print(f"\nKira truth: {kira_truth_str}")
+        if kira_sailir_matches:
+            print(f"SAILIR actions matching Kira IBP equations: {len(kira_sailir_matches)}")
+            kira_ranks = sorted(kira_sailir_matches.keys(),
+                                key=lambda ci: int(np.where(ranked == ci)[0][0]))
+            for ci in kira_ranks[:10]:
+                rank = int(np.where(ranked == ci)[0][0]) + 1
+                tag = action_results[ci][0] if action_results[ci] else 'None'
+                print(f"  action[{ci}]: rank {rank}/{len(valid_actions)}  "
+                      f"prob={probs[ci]:.4f}  ({tag})  kira_eq={kira_sailir_matches[ci]}")
+        else:
+            print("  No SAILIR actions matched Kira IBP equations directly.")
+            print("  (Kira likely used sector symmetries not in SAILIR's action space.)")
+
+
+def _load_kira(kira_dir, integral, topology, valid_actions, ibp_t, li_t, prime):
+    """Parse Kira result dir; return (truth_str, {action_idx: note}).
+
+    truth_str: human-readable reduction formula for the target integral.
+    action matches: currently empty — direct matching requires the full Kira
+    id→integral map which is only available for the mandatory list entry.
+    The Kira SYSTEM file shows the direct 1-step reduction uses a sector
+    symmetry (momentum relabeling), not a pure IBP/LI — so no SAILIR action
+    maps to it directly.
+    """
+    kira_result = kira_dir / 'results' / 'TB' / 'kira'
+    if not kira_result.exists():
+        print(f"  [kira] result file not found: {kira_result}")
+        return None, {}
+
+    text = kira_result.read_text()
+
+    # Identify our integral's Kira ID from the id2int file
+    integral_id = None
+    id2int_path = kira_dir / 'results' / 'TB' / 'id2int'
+    if id2int_path.exists():
+        try:
+            import yaml as _yaml
+            rows = _yaml.safe_load(id2int_path.read_text()) or []
+            for row in rows:
+                if tuple(row[1:12]) == integral:
+                    integral_id = row[0]
+                    break
+        except Exception:
+            pass
+
+    from generate_multisector_data import get_masters_for_sector as _get_masters
+    int_sector = get_sector_id(integral)
+    int_masters = list(_get_masters(int_sector))
+
+    truth_str = None
+    if integral_id is not None:
+        # kira file format: "- Eq:\n  - [id,...,"1"]\n  - [1,...,"coeff"]\n"
+        # master has id=1 in Kira convention
+        blocks = re.split(r'- Eq:\s*\n', text)
+        for block in blocks:
+            entries = re.findall(r'\[(\d+),\d+,\d+,\d+,\d+,"([^"]+)"\]', block)
+            if not entries:
+                continue
+            if int(entries[0][0]) == integral_id:
+                for eid, ecoeff in entries:
+                    if int(eid) == 1:
+                        master_str = list(int_masters[0]) if int_masters else '?'
+                        truth_str = (
+                            f"TB{list(integral)} = -({ecoeff}) × TB{master_str}"
+                        )
+                        break
+                break
+
+    if truth_str is None:
+        if integral_id is not None:
+            m = re.search(
+                rf'\[{integral_id},\d+,\d+,\d+,\d+,"1"\].*?\[1,\d+,\d+,\d+,\d+,"([^"]+)"\]',
+                text, re.DOTALL)
+            if m:
+                truth_str = f"TB{list(integral)} = -({m.group(1)}) × master"
+        if truth_str is None:
+            truth_str = "(could not parse reduction formula from Kira output)"
+
+    # Check Kira SYSTEM file for sector-symmetry vs IBP classification
+    system_glob = list((kira_dir / 'tmp' / 'TB').glob('SYSTEM_TB_*.gz'))
+    sector_sym_note = ""
+    if system_glob and integral_id is not None:
+        with gzip.open(system_glob[0], 'rt') as gf:
+            sys_text = gf.read()
+        # Look for blocks seeded by our integral_id
+        seed_block_re = re.compile(
+            rf'Eq\n{integral_id}\n(\d+)\n((?:.*\n)*?)(?=Eq|\Z)')
+        n_direct_eqs = len(seed_block_re.findall(sys_text))
+        # Check if any block with 2 terms is just a symmetry relation
+        sym_blocks = re.findall(
+            rf'Eq\n{integral_id}\n2\n(\d+) (-?\d+) (\d+) \d+ \d+ \d+\n'
+            rf'(\d+) (-?\d+) (\d+) \d+ \d+ \d+\n',
+            sys_text)
+        if sym_blocks:
+            sector_sym_note = (
+                f"\nKira SYSTEM: found {len(sym_blocks)} 2-term equation(s) seeded by target "
+                f"(likely sector symmetry, not in SAILIR action space)."
+            )
+
+    return (truth_str or "(no truth parsed)") + sector_sym_note, {}
 
 
 if __name__ == '__main__':
