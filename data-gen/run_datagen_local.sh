@@ -11,10 +11,10 @@ set -e
 
 # ---- config: change these for your topology / dataset ----------------------
 TOPOLOGY=topology_input/hexabox   # rel. to SAILIR_DIR; must have IBP, LI, masters
-DATASET=hexabox_test               # output: data/${DATASET}_raw_jsonl/
-N_WORKERS=50                       # number of parallel workers (= number of shards)
-N_SCRAMBLES=100                    # scrambles per worker
-MAX_CONCURRENT=50                  # max simultaneous workers (<=120 on tplx)
+DATASET=hexabox_13M_biased         # output: data/${DATASET}_raw_jsonl/
+N_WORKERS=1000                     # number of parallel workers (= number of shards)
+N_SCRAMBLES=1000                   # scrambles per worker (1000x1000 = 1M scrambles ~ 13M samples)
+MAX_CONCURRENT=120                 # max simultaneous workers (<=120 on tplx)
 # ----------------------------------------------------------------------------
 
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

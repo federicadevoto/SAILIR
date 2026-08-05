@@ -319,8 +319,13 @@ def find_candidates(ibp_t, li_t, expr, num_ops, sector_id):
     return candidates
 
 
+def _is_pure_dot(k):
+    """True if integral has no negative indices (no ISP numerators) and at least one index > 1."""
+    return all(i >= 0 for i in k) and any(i > 1 for i in k)
+
+
 def scramble(start, ibp_t, li_t, num_ops, n_steps, sector_id,
-             filter_lateral=False, bias_low_s_elim=False):
+             filter_lateral=False, bias_low_s_elim=False, bias_dots_elim=False):
     """Scramble expression using only actions that don't introduce higher/lateral sectors.
 
     bias_low_s_elim: if True, when choosing which integral to eliminate from the
@@ -328,6 +333,11 @@ def scramble(start, ibp_t, li_t, num_ops, n_steps, sector_id,
         is replaced by the rest of the equation, so removing a low-s integral
         tends to LEAVE high-s ones in the expression — pushing scramble outputs
         toward the deep-ISP regime that the baseline underrepresents.
+
+    bias_dots_elim: if True, prefer eliminating non-dot integrals from the IBP
+        equation. A "pure dot" (all non-negative indices, at least one > 1) is
+        10x less likely to be chosen as elim than a non-dot, so dots accumulate
+        in the expression and appear more often as targets in the training data.
     """
     expr = dict(start)
     used_ibps = []
@@ -356,10 +366,18 @@ def scramble(start, ibp_t, li_t, num_ops, n_steps, sector_id,
             if not top_only:
                 continue
 
-            if bias_low_s_elim and len(top_only) > 1:
-                # Weight by 1/(1+s) so low-s integrals are heavily preferred.
-                # weight(k) returns (r, s, |abs|); we use s = weight(k)[1].
-                w = [1.0 / (1 + weight(k)[1]) for k in top_only]
+            if (bias_low_s_elim or bias_dots_elim) and len(top_only) > 1:
+                # Weights are multiplicative so both flags can be active together.
+                # bias_low_s_elim: 1/(1+s) → low-s integrals easily eliminated, keeping high-s in expr
+                # bias_dots_elim:  0.1 for pure-dots → dots rarely eliminated, keeping them in expr
+                w = []
+                for k in top_only:
+                    wi = 1.0
+                    if bias_low_s_elim:
+                        wi *= 1.0 / (1 + weight(k)[1])
+                    if bias_dots_elim:
+                        wi *= 0.1 if _is_pure_dot(k) else 1.0
+                    w.append(wi)
                 elim = random.choices(top_only, weights=w)[0]
             else:
                 elim = random.choice(top_only)
@@ -520,6 +538,11 @@ def main():
                         help='Bias scramble to prefer eliminating low-s integrals '
                              '(so substituted-in terms are high-s). Pushes the '
                              'output (r,s) distribution toward deep ISPs.')
+    parser.add_argument('--bias-dots-elim', action='store_true',
+                        help='Bias scramble to prefer eliminating non-dot integrals. '
+                             'A "pure dot" (all non-negative indices, at least one > 1) '
+                             'is 10x less likely to be chosen as elim, so dots accumulate '
+                             'in the scrambled expression and appear as training targets.')
     parser.add_argument('--restrict-sectors', type=str, default=None,
                         help='Comma-separated sector_ids to restrict scrambling to. '
                              'If omitted, all valid sectors are used.')
@@ -557,6 +580,7 @@ def main():
         print(f"Using all {len(sector_list)} sectors "
               f"(1..{(1 << N_DENOMINATORS) - 1})", flush=True)
     print(f"bias_low_s_elim: {args.bias_low_s_elim}", flush=True)
+    print(f"bias_dots_elim: {args.bias_dots_elim}", flush=True)
 
     # Load IBP/LI templates
     ibp_t = parse_templates(args.ibp_path)
@@ -604,7 +628,8 @@ def main():
             n_steps = random.randint(args.min_steps, args.max_steps)
             scrambled, used_ibps = scramble(start, ibp_t, li_t, num_ops, n_steps, sector_id,
                                            filter_lateral=args.filter_lateral,
-                                           bias_low_s_elim=args.bias_low_s_elim)
+                                           bias_low_s_elim=args.bias_low_s_elim,
+                                           bias_dots_elim=args.bias_dots_elim)
 
             if not used_ibps:
                 # Check if this is a vanishing corner (expression became empty or trivial)

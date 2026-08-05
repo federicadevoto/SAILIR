@@ -40,6 +40,7 @@ PYTHONUNBUFFERED=1 "${PYTHON}" -u data-gen/generate_multisector_data.py \
     --n_scrambles ${N_SCRAMBLES} \
     --start_seed  ${START_SEED} \
     --output      "${OUTPUT_FILE}" \
-    --prime 1009 --min_steps 5 --max_steps 25
+    --prime 1009 --min_steps 5 --max_steps 25 \
+    --bias-low-s-elim --bias-dots-elim
 
 echo "worker ${WORKER_ID} done."
