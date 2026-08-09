@@ -12,10 +12,10 @@
 set -e
 
 # ---- config: must match the Stage-1 run ------------------------------------
-TOPOLOGY=topology_input/hexabox   # rel. to SAILIR_DIR
-DATASET=hexabox_test               # input: data/${DATASET}_raw_jsonl/
-N_SHARDS=50                        # = N_WORKERS from Stage 1
-MAX_CONCURRENT=50                  # max simultaneous preprocess jobs
+TOPOLOGY=topology_input/hexabox      # rel. to SAILIR_DIR
+DATASET=hexabox_13M_biased          # input: data/${DATASET}_raw_jsonl/
+N_SHARDS=1000                       # = N_WORKERS from Stage 1
+MAX_CONCURRENT=120                  # max simultaneous preprocess jobs
 # ----------------------------------------------------------------------------
 
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
