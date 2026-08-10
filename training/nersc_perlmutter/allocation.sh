@@ -53,6 +53,7 @@ export MASTER_PORT=29500
 export NCCL_DEBUG=WARN
 export OMP_NUM_THREADS=16
 export PYTHONUNBUFFERED=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 TOPOLOGY=${TOPOLOGY:-topology_input/pentagonbox}
 SHARDS_DIR=${SHARDS_DIR:-data/pentagonbox_10x_packed}
