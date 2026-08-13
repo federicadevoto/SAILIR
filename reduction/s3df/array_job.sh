@@ -22,7 +22,7 @@
 #SBATCH --account=epptheory:qcd
 #SBATCH --partition=milano
 #SBATCH --qos=normal
-#SBATCH --array=0-699%8
+#SBATCH --array=0-699
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=16G
