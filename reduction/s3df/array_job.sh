@@ -4,20 +4,29 @@
 # One task per integral, 32 CPUs per task.
 # %8 limits concurrent tasks to 8 → 8×32 = 256 cores (full priority allocation).
 #
-# Submit from repo root:
-#   mkdir -p logs
-#   sbatch reduction/s3df/array_job.sh
+# S3DF MaxArraySize=100, so submit 7 batches (task IDs always 0-99,
+# BATCH_OFFSET shifts which integral each task processes):
 #
-# Resubmit to retry timed-out or failed integrals (skip-if-done is automatic):
-#   sbatch reduction/s3df/array_job.sh
+#   mkdir -p logs
+#   for offset in 0 100 200 300 400 500 600; do
+#     sbatch --array=0-99 --export=ALL,BATCH_OFFSET=$offset \
+#            reduction/s3df/array_job.sh
+#   done
+#
+# Resubmit (skip-if-done is automatic — safe to rerun any batch):
+#   for offset in 0 100 200 300 400 500 600; do
+#     sbatch --array=0-99 --export=ALL,BATCH_OFFSET=$offset \
+#            reduction/s3df/array_job.sh
+#   done
 #
 # Check progress:
 #   find results/hexabox -name "reduction.pkl" | wc -l     # succeeded
 #   find results/hexabox -name "reduction.timeout" | wc -l # timed out
 #
 # Env switches (all optional):
+#   BATCH_OFFSET      — index of first integral in this batch (default 0)
 #   INTEGRAL_LIST, MODEL, TOPOLOGY, OUTBASE — paths relative to repo root
-#   INTEGRAL_TIMEOUT — seconds per integral (default 10500 = 2h55m)
+#   INTEGRAL_TIMEOUT  — seconds per integral (default 10500 = 2h55m)
 #SBATCH --job-name=hb_reduce
 #SBATCH --account=epptheory:qcd
 #SBATCH --partition=milano
@@ -42,13 +51,15 @@ MODEL=${MODEL:-checkpoints/hexabox_13M_biased/best_model.pt}
 TOPOLOGY=${TOPOLOGY:-topology_input/hexabox}
 OUTBASE=${OUTBASE:-results/hexabox}
 INTEGRAL_TIMEOUT=${INTEGRAL_TIMEOUT:-10500}   # 5 min buffer before 3h SLURM limit
+BATCH_OFFSET=${BATCH_OFFSET:-0}              # shift integral index for batches >0
 
 # Read integral for this task (0-indexed, skip blank lines and comments)
+TASK_IDX=$(( SLURM_ARRAY_TASK_ID + BATCH_OFFSET ))
 INTEGRAL=$(awk 'NF && !/^#/ { if (i++ == n) { print; exit } }' \
-           n="$SLURM_ARRAY_TASK_ID" "$INTEGRAL_LIST")
+           n="$TASK_IDX" "$INTEGRAL_LIST")
 
 if [[ -z "$INTEGRAL" ]]; then
-    echo "No integral at index $SLURM_ARRAY_TASK_ID" >&2
+    echo "No integral at index $TASK_IDX (array task $SLURM_ARRAY_TASK_ID + offset $BATCH_OFFSET)" >&2
     exit 1
 fi
 
