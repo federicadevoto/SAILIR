@@ -14,7 +14,7 @@
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 INTEGRAL_LIST=${INTEGRAL_LIST:-$BASE/reduction/integrals_to_reduce.txt}
-MODEL=${MODEL:-$BASE/checkpoints/hexabox_100k/best_model.pt}
+MODEL=${MODEL:-$BASE/checkpoints/hexabox_13M_biased/best_model.pt}
 TOPOLOGY=${TOPOLOGY:-$BASE/topology_input/hexabox}
 OUTBASE=${OUTBASE:-$BASE/results/hexabox}
 PYTHON=${PYTHON:-python}

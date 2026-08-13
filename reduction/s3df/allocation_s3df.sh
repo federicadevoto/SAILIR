@@ -13,8 +13,9 @@
 #   CPUS_PER_CHUNK   — CPU budget per chunk (default 8)
 #   N_CHUNKS         — parallel chunks (default 16)
 #SBATCH --job-name=hexabox_reduce
-#SBATCH --account=epptheory:default
+#SBATCH --account=epptheory:qcd
 #SBATCH --partition=milano
+#SBATCH --qos=normal
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=128G
@@ -36,7 +37,7 @@ fi
 
 export TOPOLOGY=${TOPOLOGY:-topology_input/hexabox}
 export INTEGRAL_LIST=${INTEGRAL_LIST:-reduction/integrals_to_reduce.txt}
-export MODEL=${MODEL:-checkpoints/hexabox_100k/best_model.pt}
+export MODEL=${MODEL:-checkpoints/hexabox_13M_biased/best_model.pt}
 export OUTBASE=${OUTBASE:-results/hexabox}
 export CPUS_PER_CHUNK=${CPUS_PER_CHUNK:-8}
 export N_CHUNKS=${N_CHUNKS:-8}
