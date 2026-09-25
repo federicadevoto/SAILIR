@@ -126,17 +126,32 @@ def submit(integral):
     return result.stdout.strip().split(';')[0]
 
 
-def running_job_ids():
-    """Return set of currently queued/running job IDs for our jobs, or None on error."""
+def queued_jobs():
+    """Return {job_id: reason} for our queued/running jobs, or None on error."""
     try:
         out = subprocess.run(
-            ['squeue', '--me', f'--name={JOB_NAME}', '-h', '-o', '%i'],
+            ['squeue', '--me', f'--name={JOB_NAME}', '-h', '-o', '%i|%R'],
             capture_output=True, text=True, timeout=30
         ).stdout
-        return {line.strip() for line in out.splitlines() if line.strip()}
+        jobs = {}
+        for line in out.splitlines():
+            if '|' not in line:
+                continue
+            jid, reason = line.split('|', 1)
+            jobs[jid.strip()] = reason.strip()
+        return jobs
     except Exception as e:
         log(f"squeue error: {e}")
         return None
+
+
+def is_held(reason):
+    """True for a job SLURM has parked and will never start on its own.
+
+    'launch failed requeued held' (bad node / prolog failure), plus admin and
+    user holds. Held jobs sit in squeue forever, so without this they would
+    occupy an active slot for the rest of the run."""
+    return 'held' in reason.lower()
 
 
 def main(integral_list_path):
@@ -154,13 +169,22 @@ def main(integral_list_path):
     while queue or active:
 
         # ── check which active jobs finished ──────────────────────────────────
-        running_ids = running_job_ids()
-        if running_ids is None:
+        jobs = queued_jobs()
+        if jobs is None:
             time.sleep(INTERVAL)
             continue
 
+        # Cancel held jobs (failed launch, admin/user hold). They never run and
+        # would otherwise hold an active slot forever; dropping them here makes
+        # them fall through to the finished/retry path below.
+        for jid, reason in list(jobs.items()):
+            if is_held(reason):
+                log(f"HELD job {jid} ({reason}) — cancelling so it can be retried")
+                subprocess.run(['scancel', jid], capture_output=True)
+                del jobs[jid]
+
         finished = {jid: integ for jid, integ in active.items()
-                    if jid not in running_ids}
+                    if jid not in jobs}
         for jid, integ in finished.items():
             del active[jid]
             if is_done(integ):
