@@ -26,6 +26,7 @@ Config (edit the block below):
 import argparse
 import subprocess
 import time
+from collections import Counter
 from pathlib import Path
 
 # ── config ────────────────────────────────────────────────────────────────────
@@ -39,15 +40,25 @@ SLURM_ACCOUNT   = 'epptheory:qcd'
 SLURM_PARTITION = 'milano'
 SLURM_QOS       = 'normal'
 SLURM_CPUS      = 32
-SLURM_MEM       = '100G'  # ~proportional share of a 480G/128-core milan node for
-                          # 32 CPUs. 16G caused mass OUT_OF_MEMORY kills: each
-                          # beam worker peaks ~1.5G and many are resident at once.
 SLURM_TIME      = '3:00:00'   # per job; increase to e.g. 6:00:00 for harder integrals
 JOB_NAME        = 'hb_meta'
 
-MAX_ACTIVE  = 8    # 8 x 32 CPUs = 256 cores = full EPPTheory:QCD allocation
-MAX_RETRIES = 3    # resubmit up to this many times before giving up
-INTERVAL    = 60   # seconds between polls
+# Memory escalation ladder. A job killed with OUT_OF_MEMORY is retried one rung
+# higher rather than repeatedly dying at the same size. 100G is roughly the
+# proportional share of a 480G/128-core milan node for 32 CPUs; the original
+# 16G caused mass OOM kills (each beam worker peaks ~1.5G, many resident).
+MEM_LADDER = ['100G', '200G', '400G']
+
+# Failure states caused by the environment rather than by the integral being
+# hard. These earn a fresh attempt WITHOUT consuming the MAX_RETRIES budget —
+# otherwise an OOM or a bad node silently burns the retries an integral needs.
+INFRA_STATES = {'OUT_OF_MEMORY', 'NODE_FAIL', 'PREEMPTED',
+                'CANCELLED', 'BOOT_FAIL', 'UNKNOWN'}
+
+MAX_ACTIVE   = 8   # 8 x 32 CPUs = 256 cores = full EPPTheory:QCD allocation
+MAX_RETRIES  = 3   # genuine (non-infra) retries before giving up on an integral
+MAX_ATTEMPTS = 8   # hard cap on total submissions, infra retries included
+INTERVAL     = 60  # seconds between polls
 # ── end config ────────────────────────────────────────────────────────────────
 
 
@@ -78,8 +89,9 @@ def is_done(integral):
     return (integral_outdir(integral) / 'reduction.pkl').exists()
 
 
-def submit(integral):
-    """Submit a SLURM job for this integral. Returns job ID string or None."""
+def submit(integral, mem):
+    """Submit a SLURM job for this integral at the given memory size.
+    Returns job ID string or None."""
     d = integral_outdir(integral)
     d.mkdir(parents=True, exist_ok=True)
     (d / 'logs').mkdir(exist_ok=True)
@@ -114,12 +126,12 @@ def submit(integral):
          f'--qos={SLURM_QOS}',
          '--ntasks=1',
          f'--cpus-per-task={SLURM_CPUS}',
-         f'--mem={SLURM_MEM}',
+         f'--mem={mem}',
          f'--time={SLURM_TIME}',
          f'--output={d}/logs/slurm_%j.out',
          f'--error={d}/logs/slurm_%j.err',
          '--wrap', f'source {BASE}/venv/bin/activate && {py_cmd}'],
-        capture_output=True, text=True
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True
     )
     if result.returncode != 0:
         log(f"sbatch failed: {result.stderr.strip()}")
@@ -133,7 +145,7 @@ def queued_jobs():
     try:
         out = subprocess.run(
             ['squeue', '--me', f'--name={JOB_NAME}', '-h', '-o', '%i|%R'],
-            capture_output=True, text=True, timeout=30
+            stdout=subprocess.PIPE, universal_newlines=True, timeout=30
         ).stdout
         jobs = {}
         for line in out.splitlines():
@@ -145,6 +157,24 @@ def queued_jobs():
     except Exception as e:
         log(f"squeue error: {e}")
         return None
+
+
+def job_state(jid):
+    """Final accounting state of a finished job: OUT_OF_MEMORY, TIMEOUT,
+    COMPLETED, NODE_FAIL, ... Returns 'UNKNOWN' if sacct has no record yet
+    (accounting can lag a little behind the job leaving squeue)."""
+    try:
+        out = subprocess.run(
+            ['sacct', '-j', jid, '--format=State', '-X', '--parsable2', '--noheader'],
+            stdout=subprocess.PIPE, universal_newlines=True, timeout=30).stdout
+    except Exception as e:
+        log(f"sacct error for {jid}: {e}")
+        return 'UNKNOWN'
+    for line in out.splitlines():
+        s = line.strip()
+        if s:
+            return s.split()[0]      # "CANCELLED by 1234" -> "CANCELLED"
+    return 'UNKNOWN'
 
 
 def is_held(reason):
@@ -162,8 +192,11 @@ def main(integral_list_path):
 
     queue    = [i for i in integrals if not is_done(i)]
     n_done   = len(integrals) - len(queue)
-    retries  = {}   # integral -> number of attempts so far
-    active   = {}   # job_id   -> integral
+    retries  = {}              # integral -> genuine (non-infra) retries used
+    attempts = {}              # integral -> total submissions, infra included
+    mem_rung = {}              # integral -> index into MEM_LADDER
+    states   = Counter()       # final SLURM state -> count, for the summary
+    active   = {}              # job_id   -> integral
     failed   = []
 
     log(f"Already done: {n_done} | To process: {len(queue)}")
@@ -182,7 +215,8 @@ def main(integral_list_path):
         for jid, reason in list(jobs.items()):
             if is_held(reason):
                 log(f"HELD job {jid} ({reason}) — cancelling so it can be retried")
-                subprocess.run(['scancel', jid], capture_output=True)
+                subprocess.run(['scancel', jid],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 del jobs[jid]
 
         finished = {jid: integ for jid, integ in active.items()
@@ -191,25 +225,50 @@ def main(integral_list_path):
             del active[jid]
             if is_done(integ):
                 log(f"SUCCESS {integ}  (job {jid})")
-            else:
-                attempt = retries.get(integ, 0) + 1
-                retries[integ] = attempt
-                if attempt <= MAX_RETRIES:
-                    log(f"RETRY {attempt}/{MAX_RETRIES}: {integ}  (job {jid} — no pkl produced)")
-                    queue.insert(0, integ)
+                continue
+
+            state = job_state(jid)
+            states[state] += 1
+            attempts[integ] = attempts.get(integ, 0) + 1
+
+            if state == 'OUT_OF_MEMORY':
+                # Resource failure, not a hard integral: step up the memory and
+                # retry for free. Only genuine failures spend MAX_RETRIES.
+                rung = mem_rung.get(integ, 0)
+                if rung + 1 < len(MEM_LADDER):
+                    mem_rung[integ] = rung + 1
+                    log(f"OOM {integ} at {MEM_LADDER[rung]} (job {jid}) "
+                        f"— retrying at {MEM_LADDER[rung+1]}")
                 else:
-                    log(f"GAVE UP ({MAX_RETRIES} retries exhausted): {integ}")
-                    failed.append(integ)
+                    log(f"OOM {integ} at {MEM_LADDER[rung]} (job {jid}) "
+                        f"— already at largest rung, retrying")
+            elif state in INFRA_STATES:
+                log(f"{state} {integ} (job {jid}) — infra failure, "
+                    f"retrying without spending a retry")
+            else:
+                retries[integ] = retries.get(integ, 0) + 1
+                log(f"{state} {integ} (job {jid}) "
+                    f"— retry {retries[integ]}/{MAX_RETRIES}")
+
+            if retries.get(integ, 0) > MAX_RETRIES:
+                log(f"GAVE UP ({MAX_RETRIES} real retries exhausted): {integ}")
+                failed.append(integ)
+            elif attempts[integ] >= MAX_ATTEMPTS:
+                log(f"GAVE UP ({MAX_ATTEMPTS} attempts incl. infra failures): {integ}")
+                failed.append(integ)
+            else:
+                queue.insert(0, integ)
 
         # ── submit new jobs while slots available ─────────────────────────────
         while queue and len(active) < MAX_ACTIVE:
             integ = queue.pop(0)
-            jid = submit(integ)
+            mem = MEM_LADDER[mem_rung.get(integ, 0)]
+            jid = submit(integ, mem)
             if jid:
                 active[jid] = integ
-                attempt = retries.get(integ, 0)
                 log(f"SUBMITTED job {jid}: {integ}"
-                    f"  (attempt {attempt+1}, active={len(active)}, queue={len(queue)})")
+                    f"  (attempt {attempts.get(integ, 0)+1}, mem={mem}, "
+                    f"active={len(active)}, queue={len(queue)})")
             else:
                 queue.insert(0, integ)   # sbatch failed — try again next cycle
                 break
@@ -219,10 +278,16 @@ def main(integral_list_path):
 
     n_succeeded = sum(1 for i in integrals if is_done(i)) - n_done
     log(f"ALL DONE — succeeded: {n_succeeded}  gave_up: {len(failed)}")
+    if states:
+        log("Job outcomes seen (a failure here is per-job, not per-integral):")
+        for state, n in states.most_common():
+            log(f"  {state:<16} {n}")
     if failed:
         log("Integrals that exhausted all retries:")
         for i in failed:
-            log(f"  {i}")
+            log(f"  {i}  (attempts={attempts.get(i, 0)}, "
+                f"real_retries={retries.get(i, 0)}, "
+                f"max_mem={MEM_LADDER[mem_rung.get(i, 0)]})")
 
 
 if __name__ == '__main__':
