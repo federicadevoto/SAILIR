@@ -39,7 +39,9 @@ SLURM_ACCOUNT   = 'epptheory:qcd'
 SLURM_PARTITION = 'milano'
 SLURM_QOS       = 'normal'
 SLURM_CPUS      = 32
-SLURM_MEM       = '16G'
+SLURM_MEM       = '100G'  # ~proportional share of a 480G/128-core milan node for
+                          # 32 CPUs. 16G caused mass OUT_OF_MEMORY kills: each
+                          # beam worker peaks ~1.5G and many are resident at once.
 SLURM_TIME      = '3:00:00'   # per job; increase to e.g. 6:00:00 for harder integrals
 JOB_NAME        = 'hb_meta'
 

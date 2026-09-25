@@ -34,7 +34,7 @@
 #SBATCH --array=0-99
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=16G
+#SBATCH --mem=100G
 #SBATCH --time=3:00:00
 #SBATCH --output=logs/reduce_array_%A_%a.out
 #SBATCH --error=logs/reduce_array_%A_%a.err
